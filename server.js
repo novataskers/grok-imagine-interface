@@ -16,13 +16,11 @@ async function start() {
     headless: process.env.XVFB ? false : "new",
     args: [
       "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process",
-      "--disable-blink-features=AutomationControlled",
-      "--window-size=1280,900",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1280,900",
     ],
     userDataDir: PROFILE_DIR,
   };
@@ -49,6 +47,8 @@ async function start() {
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server });
+
+  app.get("/health", (req, res) => res.send("ok"));
 
   app.get("/", (req, res) => {
     res.send(`<!DOCTYPE html>

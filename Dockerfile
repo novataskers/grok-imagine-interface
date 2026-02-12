@@ -21,6 +21,7 @@ COPY server.js ./
 ENV CHROME_PROFILE_DIR=/data/chrome-profile
 ENV XVFB=1
 
+ENV PORT=4000
 EXPOSE 4000
 
 CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x900x24", "node", "server.js"]
