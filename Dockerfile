@@ -17,6 +17,8 @@ RUN npm install --production
 
 COPY server.js ./
 
+ENV CHROME_PROFILE_DIR=/data/chrome-profile
+
 EXPOSE 4000
 
 CMD ["node", "server.js"]

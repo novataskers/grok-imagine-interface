@@ -8,22 +8,7 @@ puppeteer.use(StealthPlugin());
 
 const PORT = process.env.PORT || 4000;
 const GROK_URL = "https://grok.com/imagine";
-
-// Cookies from the user's session
-const COOKIES_STRING = process.env.GROK_COOKIES || "";
-
-function parseCookies(cookieStr) {
-  if (!cookieStr) return [];
-  return cookieStr.split(";").map((c) => {
-    const [name, ...rest] = c.trim().split("=");
-    return {
-      name: name.trim(),
-      value: rest.join("=").trim(),
-      domain: ".grok.com",
-      path: "/",
-    };
-  });
-}
+const PROFILE_DIR = process.env.CHROME_PROFILE_DIR || "./.chrome-profile";
 
 async function start() {
   console.log("Launching browser...");
@@ -33,47 +18,33 @@ async function start() {
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-gpu",
       "--no-first-run",
       "--no-zygote",
       "--single-process",
+      "--disable-blink-features=AutomationControlled",
     ],
-    userDataDir: "./.chrome-profile",
+    userDataDir: PROFILE_DIR,
   };
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
     launchOpts.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   }
-  const browser = await puppeteer.launch(launchOpts);
 
+  const browser = await puppeteer.launch(launchOpts);
   const page = await browser.newPage();
-  await page.setViewport({ width: 1920, height: 1080 });
+  await page.setViewport({ width: 1280, height: 800 });
   await page.setUserAgent(
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   );
 
-  // Set cookies if provided
-  const cookies = parseCookies(COOKIES_STRING);
-  if (cookies.length > 0) {
-    await page.setCookie(...cookies);
-    console.log(`Set ${cookies.length} cookies`);
-  }
-
+  console.log(`Chrome profile: ${PROFILE_DIR}`);
   console.log("Navigating to Grok Imagine...");
   await page.goto(GROK_URL, { waitUntil: "networkidle2", timeout: 60000 });
+  console.log(`Page title: ${await page.title()}`);
+  console.log(`URL: ${page.url()}`);
 
-  const title = await page.title();
-  console.log(`Page title: ${title}`);
+  // Create CDP session for high-performance screencast
+  const cdp = await page.createCDPSession();
 
-  // Check if logged in
-  const url = page.url();
-  console.log(`Current URL: ${url}`);
-  if (title.includes("Imagine")) {
-    console.log("Logged in!");
-  } else {
-    console.log("Not logged in or blocked by Cloudflare");
-  }
-
-  // Express app serves a page that shows live screenshots via WebSocket
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server });
@@ -87,51 +58,46 @@ async function start() {
   <title>Grok Imagine</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
-    canvas {
+    body { background: #0a0a0a; overflow: hidden; width: 100vw; height: 100vh; }
+    #screen {
       width: 100vw;
       height: 100vh;
       display: block;
-      cursor: default;
-      image-rendering: auto;
+      object-fit: contain;
+      background: #0a0a0a;
     }
     #status {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      color: #888; font-family: system-ui; font-size: 16px; z-index: 10;
+      color: #666; font-family: system-ui; font-size: 14px; z-index: 10;
     }
   </style>
 </head>
 <body>
   <div id="status">Connecting...</div>
-  <canvas id="screen"></canvas>
+  <img id="screen" alt="">
   <script>
-    const canvas = document.getElementById('screen');
-    const ctx = canvas.getContext('2d');
+    const img = document.getElementById('screen');
     const status = document.getElementById('status');
-    let ws;
-    let connected = false;
+    let ws, connected = false;
+    let currentBlob = null;
 
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       ws = new WebSocket(proto + '://' + location.host);
+      ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
         connected = true;
         status.style.display = 'none';
-        // Request initial viewport size sync
         ws.send(JSON.stringify({ type: 'resize', width: window.innerWidth, height: window.innerHeight }));
       };
 
       ws.onmessage = (e) => {
-        if (e.data instanceof Blob) {
-          const img = new Image();
-          img.onload = () => {
-            canvas.width = img.width;
-            canvas.height = img.height;
-            ctx.drawImage(img, 0, 0);
-            URL.revokeObjectURL(img.src);
-          };
-          img.src = URL.createObjectURL(e.data);
+        if (e.data instanceof ArrayBuffer) {
+          if (currentBlob) URL.revokeObjectURL(currentBlob);
+          const blob = new Blob([e.data], { type: 'image/jpeg' });
+          currentBlob = URL.createObjectURL(blob);
+          img.src = currentBlob;
         }
       };
 
@@ -139,43 +105,47 @@ async function start() {
         connected = false;
         status.textContent = 'Reconnecting...';
         status.style.display = 'block';
-        setTimeout(connect, 2000);
+        setTimeout(connect, 1500);
       };
     }
 
-    // Scale mouse coordinates from canvas to viewport
-    function scaleCoords(e) {
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      return {
-        x: Math.round((e.clientX - rect.left) * scaleX),
-        y: Math.round((e.clientY - rect.top) * scaleY)
-      };
+    function getCoords(e) {
+      const rect = img.getBoundingClientRect();
+      // Account for object-fit: contain
+      const imgAspect = img.naturalWidth / img.naturalHeight;
+      const boxAspect = rect.width / rect.height;
+      let renderW, renderH, offsetX, offsetY;
+      if (imgAspect > boxAspect) {
+        renderW = rect.width;
+        renderH = rect.width / imgAspect;
+        offsetX = 0;
+        offsetY = (rect.height - renderH) / 2;
+      } else {
+        renderH = rect.height;
+        renderW = rect.height * imgAspect;
+        offsetX = (rect.width - renderW) / 2;
+        offsetY = 0;
+      }
+      const x = Math.round(((e.clientX - rect.left - offsetX) / renderW) * img.naturalWidth);
+      const y = Math.round(((e.clientY - rect.top - offsetY) / renderH) * img.naturalHeight);
+      return { x: Math.max(0, x), y: Math.max(0, y) };
     }
 
-    canvas.addEventListener('click', (e) => {
+    img.addEventListener('click', (e) => {
       if (!connected) return;
-      const { x, y } = scaleCoords(e);
-      ws.send(JSON.stringify({ type: 'click', x, y }));
+      ws.send(JSON.stringify({ type: 'click', ...getCoords(e) }));
     });
-
-    canvas.addEventListener('mousemove', (e) => {
+    img.addEventListener('mousemove', (e) => {
       if (!connected) return;
-      const { x, y } = scaleCoords(e);
-      ws.send(JSON.stringify({ type: 'mousemove', x, y }));
+      ws.send(JSON.stringify({ type: 'mousemove', ...getCoords(e) }));
     });
-
-    canvas.addEventListener('mousedown', (e) => {
+    img.addEventListener('mousedown', (e) => {
       if (!connected) return;
-      const { x, y } = scaleCoords(e);
-      ws.send(JSON.stringify({ type: 'mousedown', x, y, button: e.button }));
+      ws.send(JSON.stringify({ type: 'mousedown', ...getCoords(e), button: e.button }));
     });
-
-    canvas.addEventListener('mouseup', (e) => {
+    img.addEventListener('mouseup', (e) => {
       if (!connected) return;
-      const { x, y } = scaleCoords(e);
-      ws.send(JSON.stringify({ type: 'mouseup', x, y, button: e.button }));
+      ws.send(JSON.stringify({ type: 'mouseup', ...getCoords(e), button: e.button }));
     });
 
     document.addEventListener('keydown', (e) => {
@@ -183,13 +153,12 @@ async function start() {
       e.preventDefault();
       ws.send(JSON.stringify({ type: 'keydown', key: e.key, code: e.code, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey }));
     });
-
     document.addEventListener('keyup', (e) => {
       if (!connected) return;
       ws.send(JSON.stringify({ type: 'keyup', key: e.key, code: e.code }));
     });
 
-    canvas.addEventListener('wheel', (e) => {
+    img.addEventListener('wheel', (e) => {
       if (!connected) return;
       e.preventDefault();
       ws.send(JSON.stringify({ type: 'scroll', deltaX: e.deltaX, deltaY: e.deltaY }));
@@ -200,35 +169,46 @@ async function start() {
       ws.send(JSON.stringify({ type: 'resize', width: window.innerWidth, height: window.innerHeight }));
     });
 
+    // Prevent default drag on the img
+    img.addEventListener('dragstart', (e) => e.preventDefault());
+
     connect();
   </script>
 </body>
 </html>`);
   });
 
-  // WebSocket handles input/output streaming
+  // Track active clients for frame broadcasting
+  const clients = new Set();
+
+  // Use CDP screencast for high-performance frame delivery
+  cdp.on("Page.screencastFrame", async ({ data, sessionId }) => {
+    // ACK immediately so Chrome sends the next frame
+    cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
+    const buf = Buffer.from(data, "base64");
+    for (const client of clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(buf, { binary: true });
+      }
+    }
+  });
+
+  async function startScreencast(width, height) {
+    await cdp.send("Page.startScreencast", {
+      format: "jpeg",
+      quality: 85,
+      maxWidth: width || 1280,
+      maxHeight: height || 800,
+      everyNthFrame: 1,
+    });
+  }
+
+  await startScreencast(1280, 800);
+  console.log("Screencast started");
+
   wss.on("connection", (ws) => {
     console.log("Client connected");
-    let streaming = true;
-
-    // Screenshot loop
-    const sendFrame = async () => {
-      if (!streaming) return;
-      try {
-        const screenshot = await page.screenshot({
-          type: "jpeg",
-          quality: 80,
-          encoding: "binary",
-        });
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(screenshot, { binary: true });
-        }
-      } catch (err) {
-        // page might be navigating
-      }
-      if (streaming) setTimeout(sendFrame, 100); // ~10fps
-    };
-    sendFrame();
+    clients.add(ws);
 
     ws.on("message", async (data) => {
       try {
@@ -258,16 +238,20 @@ async function start() {
             await page.mouse.wheel({ deltaX: msg.deltaX, deltaY: msg.deltaY });
             break;
           case "resize":
-            await page.setViewport({ width: msg.width, height: msg.height });
+            if (msg.width > 0 && msg.height > 0) {
+              await page.setViewport({ width: msg.width, height: msg.height });
+              await cdp.send("Page.stopScreencast");
+              await startScreencast(msg.width, msg.height);
+            }
             break;
         }
       } catch (err) {
-        // ignore input errors
+        // ignore input errors during navigation
       }
     });
 
     ws.on("close", () => {
-      streaming = false;
+      clients.delete(ws);
       console.log("Client disconnected");
     });
   });
@@ -278,27 +262,13 @@ async function start() {
 }
 
 function mapKey(key) {
-  const keyMap = {
-    Enter: "Enter",
-    Backspace: "Backspace",
-    Tab: "Tab",
-    Escape: "Escape",
-    ArrowUp: "ArrowUp",
-    ArrowDown: "ArrowDown",
-    ArrowLeft: "ArrowLeft",
-    ArrowRight: "ArrowRight",
-    Delete: "Delete",
-    Home: "Home",
-    End: "End",
-    PageUp: "PageUp",
-    PageDown: "PageDown",
-    " ": "Space",
-    Control: "Control",
-    Shift: "Shift",
-    Alt: "Alt",
-    Meta: "Meta",
+  const m = {
+    Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Escape: "Escape",
+    ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
+    Delete: "Delete", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
+    " ": "Space", Control: "Control", Shift: "Shift", Alt: "Alt", Meta: "Meta",
   };
-  return keyMap[key] || null;
+  return m[key] || null;
 }
 
 start().catch(console.error);
