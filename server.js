@@ -16,11 +16,11 @@ async function start() {
     headless: process.env.XVFB ? false : "new",
     args: [
       "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--no-first-run",
-        "--disable-blink-features=AutomationControlled",
-        "--window-size=1280,900",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--no-first-run",
+      "--disable-blink-features=AutomationControlled",
+      "--window-size=1280,900",
     ],
     userDataDir: PROFILE_DIR,
   };
@@ -35,15 +35,11 @@ async function start() {
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   );
 
-  console.log(`Chrome profile: ${PROFILE_DIR}`);
   console.log("Navigating to Grok Imagine...");
   await page.goto(GROK_URL, { waitUntil: "networkidle2", timeout: 60000 });
   console.log(`Page title: ${await page.title()}`);
-  console.log(`URL: ${page.url()}`);
 
-  // Create CDP session for high-performance screencast
   const cdp = await page.createCDPSession();
-
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server });
@@ -112,7 +108,6 @@ async function start() {
 
     function getCoords(e) {
       const rect = img.getBoundingClientRect();
-      // Account for object-fit: contain
       const imgAspect = img.naturalWidth / img.naturalHeight;
       const boxAspect = rect.width / rect.height;
       let renderW, renderH, offsetX, offsetY;
@@ -170,21 +165,16 @@ async function start() {
       ws.send(JSON.stringify({ type: 'resize', width: window.innerWidth, height: window.innerHeight }));
     });
 
-    // Prevent default drag on the img
     img.addEventListener('dragstart', (e) => e.preventDefault());
-
     connect();
   </script>
 </body>
 </html>`);
   });
 
-  // Track active clients for frame broadcasting
   const clients = new Set();
 
-  // Use CDP screencast for high-performance frame delivery
   cdp.on("Page.screencastFrame", async ({ data, sessionId }) => {
-    // ACK immediately so Chrome sends the next frame
     cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
     const buf = Buffer.from(data, "base64");
     for (const client of clients) {
@@ -205,7 +195,6 @@ async function start() {
   }
 
   await startScreencast(1280, 800);
-  console.log("Screencast started");
 
   wss.on("connection", (ws) => {
     console.log("Client connected");
@@ -246,9 +235,7 @@ async function start() {
             }
             break;
         }
-      } catch (err) {
-        // ignore input errors during navigation
-      }
+      } catch (err) {}
     });
 
     ws.on("close", () => {
