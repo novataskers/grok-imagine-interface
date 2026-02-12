@@ -1,0 +1,9 @@
+{
+  "projectId": "78fbb84d-8145-452a-87e9-3a9b3e20c9e3",
+  "createdAt": 1770844631298,
+  "version": "1.0",
+  "startupCommands": [
+    "bun install; node server.js"
+  ],
+  "templateId": "any"
+}
