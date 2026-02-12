@@ -1,8 +1,9 @@
 FROM node:20-slim
 
-# Install Chrome dependencies
+# Install Chrome dependencies + xvfb for virtual display
 RUN apt-get update && apt-get install -y \
     chromium \
+    xvfb \
     fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-khmeros fonts-kacst fonts-freefont-ttf \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
@@ -18,7 +19,8 @@ RUN npm install --production
 COPY server.js ./
 
 ENV CHROME_PROFILE_DIR=/data/chrome-profile
+ENV XVFB=1
 
 EXPOSE 4000
 
-CMD ["node", "server.js"]
+CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x900x24", "node", "server.js"]

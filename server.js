@@ -13,7 +13,7 @@ const PROFILE_DIR = process.env.CHROME_PROFILE_DIR || "./.chrome-profile";
 async function start() {
   console.log("Launching browser...");
   const launchOpts = {
-    headless: "new",
+    headless: process.env.XVFB ? false : "new",
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -22,6 +22,7 @@ async function start() {
       "--no-zygote",
       "--single-process",
       "--disable-blink-features=AutomationControlled",
+      "--window-size=1280,900",
     ],
     userDataDir: PROFILE_DIR,
   };
