@@ -10,6 +10,9 @@ const PORT = process.env.PORT || 4000;
 const GROK_URL = "https://grok.com/imagine";
 const PROFILE_DIR = process.env.CHROME_PROFILE_DIR || "./.chrome-profile";
 
+// Pixels to crop from top of the Grok page (the "Imagine" header bar)
+const CROP_TOP = 56;
+
 async function start() {
   console.log("Launching browser...");
   const launchOpts = {
@@ -39,7 +42,8 @@ async function start() {
   await page.goto(GROK_URL, { waitUntil: "networkidle2", timeout: 60000 });
   console.log(`Page title: ${await page.title()}`);
 
-  const cdp = await page.createCDPSession();
+  const cdp = await page.target().createCDPSession();
+
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocket.Server({ server });
@@ -56,12 +60,19 @@ async function start() {
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0a0a0a; overflow: hidden; width: 100vw; height: 100vh; }
-    #screen {
+    #crop {
       width: 100vw;
       height: 100vh;
+      overflow: hidden;
+      position: relative;
+    }
+    #screen {
+      position: absolute;
+      top: -${CROP_TOP}px;
+      left: 0;
+      width: 100vw;
+      height: calc(100vh + ${CROP_TOP}px);
       display: block;
-      object-fit: contain;
-      background: #0a0a0a;
     }
     #status {
       position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -71,12 +82,15 @@ async function start() {
 </head>
 <body>
   <div id="status">Connecting...</div>
-  <img id="screen" alt="">
+  <div id="crop">
+    <img id="screen" alt="">
+  </div>
   <script>
     const img = document.getElementById('screen');
+    const crop = document.getElementById('crop');
     const status = document.getElementById('status');
+    const CROP_TOP = ${CROP_TOP};
     let ws, connected = false;
-    let currentBlob = null;
 
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -90,12 +104,11 @@ async function start() {
       };
 
       ws.onmessage = (e) => {
-        if (e.data instanceof ArrayBuffer) {
-          if (currentBlob) URL.revokeObjectURL(currentBlob);
-          const blob = new Blob([e.data], { type: 'image/jpeg' });
-          currentBlob = URL.createObjectURL(blob);
-          img.src = currentBlob;
-        }
+        if (typeof e.data === 'string') return;
+        const blob = new Blob([e.data], { type: 'image/jpeg' });
+        const url = URL.createObjectURL(blob);
+        img.onload = () => URL.revokeObjectURL(url);
+        img.src = url;
       };
 
       ws.onclose = () => {
@@ -107,39 +120,33 @@ async function start() {
     }
 
     function getCoords(e) {
-      const rect = img.getBoundingClientRect();
-      const imgAspect = img.naturalWidth / img.naturalHeight;
-      const boxAspect = rect.width / rect.height;
-      let renderW, renderH, offsetX, offsetY;
-      if (imgAspect > boxAspect) {
-        renderW = rect.width;
-        renderH = rect.width / imgAspect;
-        offsetX = 0;
-        offsetY = (rect.height - renderH) / 2;
-      } else {
-        renderH = rect.height;
-        renderW = rect.height * imgAspect;
-        offsetX = (rect.width - renderW) / 2;
-        offsetY = 0;
-      }
-      const x = Math.round(((e.clientX - rect.left - offsetX) / renderW) * img.naturalWidth);
-      const y = Math.round(((e.clientY - rect.top - offsetY) / renderH) * img.naturalHeight);
+      const rect = crop.getBoundingClientRect();
+      // Map click position within the visible crop area to page coordinates
+      const imgW = img.naturalWidth || 1280;
+      const imgH = img.naturalHeight || 800;
+      const scaleX = imgW / rect.width;
+      const scaleY = imgH / rect.height;
+      const x = Math.round((e.clientX - rect.left) * scaleX);
+      const y = Math.round((e.clientY - rect.top) * scaleY);
       return { x: Math.max(0, x), y: Math.max(0, y) };
     }
 
-    img.addEventListener('click', (e) => {
+    crop.addEventListener('click', (e) => {
       if (!connected) return;
-      ws.send(JSON.stringify({ type: 'click', ...getCoords(e) }));
+      const c = getCoords(e);
+      // The visible area starts at CROP_TOP, so no offset needed -
+      // the scale already maps to the full image, and the top is shifted
+      ws.send(JSON.stringify({ type: 'click', ...c }));
     });
-    img.addEventListener('mousemove', (e) => {
+    crop.addEventListener('mousemove', (e) => {
       if (!connected) return;
       ws.send(JSON.stringify({ type: 'mousemove', ...getCoords(e) }));
     });
-    img.addEventListener('mousedown', (e) => {
+    crop.addEventListener('mousedown', (e) => {
       if (!connected) return;
       ws.send(JSON.stringify({ type: 'mousedown', ...getCoords(e), button: e.button }));
     });
-    img.addEventListener('mouseup', (e) => {
+    crop.addEventListener('mouseup', (e) => {
       if (!connected) return;
       ws.send(JSON.stringify({ type: 'mouseup', ...getCoords(e), button: e.button }));
     });
@@ -154,7 +161,7 @@ async function start() {
       ws.send(JSON.stringify({ type: 'keyup', key: e.key, code: e.code }));
     });
 
-    img.addEventListener('wheel', (e) => {
+    crop.addEventListener('wheel', (e) => {
       if (!connected) return;
       e.preventDefault();
       ws.send(JSON.stringify({ type: 'scroll', deltaX: e.deltaX, deltaY: e.deltaY }));
@@ -173,32 +180,36 @@ async function start() {
   });
 
   const clients = new Set();
+  let screencastRunning = false;
 
-  cdp.on("Page.screencastFrame", async ({ data, sessionId }) => {
-    cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
-    const buf = Buffer.from(data, "base64");
-    for (const client of clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(buf, { binary: true });
+  async function startScreencast() {
+    if (screencastRunning) return;
+    screencastRunning = true;
+    cdp.on("Page.screencastFrame", async (frame) => {
+      const buf = Buffer.from(frame.data, "base64");
+      for (const c of clients) {
+        if (c.readyState === WebSocket.OPEN) c.send(buf);
       }
-    }
-  });
-
-  async function startScreencast(width, height) {
+      try { await cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }); } catch {}
+    });
     await cdp.send("Page.startScreencast", {
       format: "jpeg",
-      quality: 85,
-      maxWidth: width || 1280,
-      maxHeight: height || 800,
-      everyNthFrame: 1,
+      quality: 75,
+      maxWidth: 1280,
+      maxHeight: 800,
     });
   }
 
-  await startScreencast(1280, 800);
+  async function stopScreencast() {
+    if (!screencastRunning) return;
+    try { await cdp.send("Page.stopScreencast"); } catch {}
+    screencastRunning = false;
+  }
 
   wss.on("connection", (ws) => {
     console.log("Client connected");
     clients.add(ws);
+    startScreencast();
 
     ws.on("message", async (data) => {
       try {
@@ -230,8 +241,10 @@ async function start() {
           case "resize":
             if (msg.width > 0 && msg.height > 0) {
               await page.setViewport({ width: msg.width, height: msg.height });
-              await cdp.send("Page.stopScreencast");
-              await startScreencast(msg.width, msg.height);
+              if (screencastRunning) {
+                await stopScreencast();
+                await startScreencast();
+              }
             }
             break;
         }
@@ -241,6 +254,7 @@ async function start() {
     ws.on("close", () => {
       clients.delete(ws);
       console.log("Client disconnected");
+      if (clients.size === 0) stopScreencast();
     });
   });
 
